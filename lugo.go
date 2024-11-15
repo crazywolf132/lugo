@@ -771,25 +771,3 @@ func (c *Config) luaToGo(lv lua.LValue, t reflect.Type) (interface{}, error) {
 		return nil, fmt.Errorf("unsupported Lua type: %s", lv.Type())
 	}
 }
-
-// setLuaMemoryLimit sets the memory limit for a Lua state
-func setLuaMemoryLimit(L *lua.LState, limitBytes int) error {
-	// Convert bytes to Kbytes for Lua
-	limitInK := limitBytes / 1024
-	if limitInK < 100 {
-		return fmt.Errorf("memory limit too small (minimum 100K)")
-	}
-	L.SetMx(limitInK)
-	return nil
-}
-
-func luaTableToTime(table *lua.LTable) (time.Time, error) {
-	year := int(table.RawGetString("year").(lua.LNumber))
-	month := time.Month(int(table.RawGetString("month").(lua.LNumber)))
-	day := int(table.RawGetString("day").(lua.LNumber))
-	hour := int(table.RawGetString("hour").(lua.LNumber))
-	min := int(table.RawGetString("min").(lua.LNumber))
-	sec := int(table.RawGetString("sec").(lua.LNumber))
-
-	return time.Date(year, month, day, hour, min, sec, 0, time.Local), nil
-}
