@@ -736,7 +736,7 @@ func TestErrorHandling(t *testing.T) {
 		{
 			name: "validation error",
 			setup: func(cfg *Config) {
-				cfg.RegisterType(context.Background(), "config", struct {
+				_ = cfg.RegisterType(context.Background(), "config", struct {
 					Age int `lua:"age"`
 				}{})
 			},
@@ -767,7 +767,7 @@ func TestErrorHandling(t *testing.T) {
 				cfg.sandbox = &Sandbox{
 					EnableFileIO: false,
 				}
-				cfg.applySandboxRestrictions()
+				_ = cfg.applySandboxRestrictions()
 			},
 			action: func(cfg *Config) error {
 				return cfg.L.DoString(`
