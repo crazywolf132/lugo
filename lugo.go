@@ -4,6 +4,8 @@ package lugo
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -691,59 +693,82 @@ func (c *Config) goToLua(v interface{}) (lua.LValue, error) {
 }
 
 func (c *Config) luaToGo(lv lua.LValue, t reflect.Type) (interface{}, error) {
-	if t == reflect.TypeOf(time.Time{}) {
-		switch lv.Type() {
-		case lua.LTTable:
-			table := lv.(*lua.LTable)
-			year := int(table.RawGetString("year").(lua.LNumber))
-			month := time.Month(int(table.RawGetString("month").(lua.LNumber)))
-			day := int(table.RawGetString("day").(lua.LNumber))
-			hour := int(table.RawGetString("hour").(lua.LNumber))
-			min := int(table.RawGetString("min").(lua.LNumber))
-			sec := int(table.RawGetString("sec").(lua.LNumber))
-			return time.Date(year, month, day, hour, min, sec, 0, time.Local), nil
-		default:
-			return nil, fmt.Errorf("cannot convert %s to time.Time", lv.Type())
-		}
+	if lv == lua.LNil {
+		return reflect.Zero(t).Interface(), nil
 	}
 
 	switch lv.Type() {
-	case lua.LTNil:
-		return reflect.Zero(t).Interface(), nil
 	case lua.LTBool:
-		if t.Kind() != reflect.Bool {
-			return nil, fmt.Errorf("cannot convert bool to %v", t)
+		if t.Kind() == reflect.Bool {
+			return bool(lv.(lua.LBool)), nil
 		}
-		return bool(lv.(lua.LBool)), nil
+		if t.Kind() == reflect.Interface {
+			return bool(lv.(lua.LBool)), nil
+		}
+		return nil, fmt.Errorf("cannot convert boolean to %v", t)
+
 	case lua.LTNumber:
 		n := float64(lv.(lua.LNumber))
 		switch t.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			return reflect.ValueOf(n).Convert(t).Interface(), nil
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			return reflect.ValueOf(n).Convert(t).Interface(), nil
-		case reflect.Float32, reflect.Float64:
-			return reflect.ValueOf(n).Convert(t).Interface(), nil
+		case reflect.Float64:
+			return n, nil
+		case reflect.Float32:
+			return float32(n), nil
+		case reflect.Int:
+			return int(n), nil
+		case reflect.Int64:
+			return int64(n), nil
+		case reflect.Int32:
+			return int32(n), nil
+		case reflect.Interface:
+			return n, nil
 		default:
 			return nil, fmt.Errorf("cannot convert number to %v", t)
 		}
+
 	case lua.LTString:
-		if t.Kind() != reflect.String {
+		if t.Kind() != reflect.String && t.Kind() != reflect.Interface {
 			return nil, fmt.Errorf("cannot convert string to %v", t)
 		}
 		return string(lv.(lua.LString)), nil
+
 	case lua.LTTable:
 		table := lv.(*lua.LTable)
+
+		// Check if table is array-like (sequential numeric keys starting from 1)
+		isArray := true
+		maxn := table.MaxN()
+		if maxn > 0 {
+			for i := 1; i <= maxn; i++ {
+				if table.RawGetInt(i) == lua.LNil {
+					isArray = false
+					break
+				}
+			}
+		} else {
+			isArray = false
+		}
+
 		switch t.Kind() {
 		case reflect.Slice:
 			slice := reflect.MakeSlice(t, 0, table.Len())
-			table.ForEach(func(_ lua.LValue, v lua.LValue) {
-				val, err := c.luaToGo(v, t.Elem())
-				if err == nil {
-					slice = reflect.Append(slice, reflect.ValueOf(val))
+			if isArray {
+				for i := 1; i <= maxn; i++ {
+					val, err := c.luaToGo(table.RawGetInt(i), t.Elem())
+					if err == nil {
+						slice = reflect.Append(slice, reflect.ValueOf(val))
+					}
 				}
-			})
+			} else {
+				table.ForEach(func(_ lua.LValue, v lua.LValue) {
+					val, err := c.luaToGo(v, t.Elem())
+					if err == nil {
+						slice = reflect.Append(slice, reflect.ValueOf(val))
+					}
+				})
+			}
 			return slice.Interface(), nil
+
 		case reflect.Map:
 			m := reflect.MakeMap(t)
 			table.ForEach(func(k, v lua.LValue) {
@@ -758,16 +783,216 @@ func (c *Config) luaToGo(lv lua.LValue, t reflect.Type) (interface{}, error) {
 				m.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(val))
 			})
 			return m.Interface(), nil
+
 		case reflect.Struct:
+			if t == reflect.TypeOf(time.Time{}) {
+				return c.luaTableToTime(table)
+			}
 			ptr := reflect.New(t)
 			if err := c.luaToStruct(table, ptr.Interface()); err != nil {
 				return nil, err
 			}
 			return ptr.Elem().Interface(), nil
+
+		case reflect.Interface:
+			// If it's an array-like table, convert to slice
+			if isArray {
+				result := make([]interface{}, 0, maxn)
+				for i := 1; i <= maxn; i++ {
+					val, err := c.luaToGo(table.RawGetInt(i), reflect.TypeOf((*interface{})(nil)).Elem())
+					if err == nil {
+						result = append(result, val)
+					}
+				}
+				return result, nil
+			}
+
+			// Otherwise convert to map
+			result := make(map[string]interface{})
+			table.ForEach(func(k, v lua.LValue) {
+				key := k.String()
+				val, err := c.luaToGo(v, reflect.TypeOf((*interface{})(nil)).Elem())
+				if err == nil {
+					result[key] = val
+				}
+			})
+			return result, nil
+
 		default:
 			return nil, fmt.Errorf("cannot convert table to %v", t)
 		}
 	default:
 		return nil, fmt.Errorf("unsupported Lua type: %s", lv.Type())
 	}
+}
+
+// Simple helper methods for common operations
+func (c *Config) DoString(script string) error {
+	return c.L.DoString(script)
+}
+
+func (c *Config) DoFile(filename string) error {
+	return c.L.DoFile(filename)
+}
+
+// GetGlobal retrieves a global variable with type conversion
+func (c *Config) GetGlobal(name string, target interface{}) error {
+	lv := c.L.GetGlobal(name)
+	if lv == lua.LNil {
+		return &Error{
+			Code:    ErrNotFound,
+			Message: fmt.Sprintf("global variable '%s' not found", name),
+		}
+	}
+
+	val := reflect.ValueOf(target)
+	if val.Kind() != reflect.Ptr {
+		return fmt.Errorf("target must be a pointer")
+	}
+
+	converted, err := c.luaToGo(lv, val.Elem().Type())
+	if err != nil {
+		return err
+	}
+
+	val.Elem().Set(reflect.ValueOf(converted))
+	return nil
+}
+
+// SetGlobal sets a global variable with type conversion
+func (c *Config) SetGlobal(name string, value interface{}) error {
+	lv, err := c.goToLua(value)
+	if err != nil {
+		return err
+	}
+	c.L.SetGlobal(name, lv)
+	return nil
+}
+
+// Call invokes a Lua function with automatic type conversion
+func (c *Config) Call(funcName string, args ...interface{}) ([]interface{}, error) {
+	fn := c.L.GetGlobal(funcName)
+	if fn == lua.LNil {
+		return nil, fmt.Errorf("function '%s' not found", funcName)
+	}
+
+	luaArgs := make([]lua.LValue, len(args))
+	for i, arg := range args {
+		lv, err := c.goToLua(arg)
+		if err != nil {
+			return nil, err
+		}
+		luaArgs[i] = lv
+	}
+
+	err := c.L.CallByParam(lua.P{
+		Fn:      fn,
+		NRet:    lua.MultRet,
+		Protect: true,
+	}, luaArgs...)
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Get all return values
+	top := c.L.GetTop()
+	result := make([]interface{}, top)
+
+	for i := 1; i <= top; i++ {
+		val := c.L.Get(i)
+
+		if val.Type() == lua.LTTable {
+			table := val.(*lua.LTable)
+			maxn := table.MaxN()
+
+			if maxn > 0 {
+				// It's an array-like table
+				slice := make([]interface{}, maxn)
+				for j := 1; j <= maxn; j++ {
+					elem := table.RawGetInt(j)
+					if elem != lua.LNil {
+						converted, err := c.luaToGo(elem, reflect.TypeOf((*interface{})(nil)).Elem())
+						if err == nil {
+							slice[j-1] = converted
+						}
+					}
+				}
+				result[i-1] = slice
+			} else {
+				// It's a regular table
+				converted, err := c.luaToGo(val, reflect.TypeOf((*interface{})(nil)).Elem())
+				if err != nil {
+					return nil, err
+				}
+				result[i-1] = converted
+			}
+		} else {
+			converted, err := c.luaToGo(val, reflect.TypeOf((*interface{})(nil)).Elem())
+			if err != nil {
+				return nil, err
+			}
+			result[i-1] = converted
+		}
+	}
+
+	c.L.SetTop(0) // Clear the stack
+	return result, nil
+}
+
+// RegisterConstants registers multiple constants at once
+func (c *Config) RegisterConstants(constants map[string]interface{}) error {
+	for name, value := range constants {
+		if err := c.SetGlobal(name, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LoadDirectory loads all .lua files from a directory
+func (c *Config) LoadDirectory(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".lua") {
+			path := filepath.Join(dir, entry.Name())
+			if err := c.L.DoFile(path); err != nil {
+				return &Error{
+					Code:    ErrExecution,
+					Message: fmt.Sprintf("failed to load %s", path),
+					Cause:   err,
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// Eval evaluates a Lua expression and returns the result
+func (c *Config) Eval(expr string) (interface{}, error) {
+	err := c.L.DoString(fmt.Sprintf("__eval_result = %s", expr))
+	if err != nil {
+		return nil, err
+	}
+
+	result := c.L.GetGlobal("__eval_result")
+	c.L.SetGlobal("__eval_result", lua.LNil) // Clean up
+
+	return c.luaToGo(result, reflect.TypeOf((*interface{})(nil)).Elem())
+}
+
+// Helper function to convert Lua table to time.Time
+func (c *Config) luaTableToTime(table *lua.LTable) (time.Time, error) {
+	year := int(table.RawGetString("year").(lua.LNumber))
+	month := int(table.RawGetString("month").(lua.LNumber))
+	day := int(table.RawGetString("day").(lua.LNumber))
+	hour := int(table.RawGetString("hour").(lua.LNumber))
+	min := int(table.RawGetString("min").(lua.LNumber))
+	sec := int(table.RawGetString("sec").(lua.LNumber))
+
+	return time.Date(year, time.Month(month), day, hour, min, sec, 0, time.Local), nil
 }

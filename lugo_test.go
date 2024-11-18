@@ -1051,3 +1051,74 @@ func TestThreadSafety(t *testing.T) {
 
 	assert.Equal(t, int32(100), counter)
 }
+
+// TestSimpleAPI tests basic API functionality
+func TestSimpleAPI(t *testing.T) {
+	tests := []struct {
+		name     string
+		script   string
+		testFunc func(*testing.T, *Config)
+	}{
+		{
+			name: "function_call",
+			script: `
+                function add(a, b)
+                    return a + b
+                end
+
+                function get_table()
+                    return {1, 2, 3}
+                end
+            `,
+			testFunc: func(t *testing.T, cfg *Config) {
+				// Test simple function call
+				result, err := cfg.Call("add", 5, 3)
+				require.NoError(t, err)
+				assert.Equal(t, float64(8), result[0])
+
+				// Test function returning table
+				result, err = cfg.Call("get_table")
+				require.NoError(t, err)
+				// The result should be a slice, not a slice containing a slice
+				assert.Equal(t, []interface{}{float64(1), float64(2), float64(3)}, result[0])
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := New()
+			defer cfg.Close()
+
+			require.NoError(t, cfg.DoString(tt.script))
+			tt.testFunc(t, cfg)
+		})
+	}
+}
+
+func TestLoadDirectory(t *testing.T) {
+	// Create temporary directory with test files
+	dir := t.TempDir()
+
+	files := map[string]string{
+		"config1.lua": `x = 1`,
+		"config2.lua": `y = 2`,
+		"other.txt":   `not a lua file`,
+	}
+
+	for name, content := range files {
+		err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644)
+		require.NoError(t, err)
+	}
+
+	cfg := New()
+	defer cfg.Close()
+
+	require.NoError(t, cfg.LoadDirectory(dir))
+
+	var x, y int
+	require.NoError(t, cfg.GetGlobal("x", &x))
+	require.NoError(t, cfg.GetGlobal("y", &y))
+	assert.Equal(t, 1, x)
+	assert.Equal(t, 2, y)
+}
