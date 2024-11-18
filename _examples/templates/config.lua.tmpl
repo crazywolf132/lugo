@@ -1,0 +1,14 @@
+service = {
+    environment = "{{ .env }}",
+    database = {
+        host = "{{ .db_host }}",
+        port = 5432,
+        name = "myapp_{{ .env }}",
+        username = "app_user",
+        password = "{{ .db_pass }}"
+    },
+    redis = {
+        host = "{{ .redis_host }}",
+        port = 6379
+    }
+} 
