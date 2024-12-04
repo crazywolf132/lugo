@@ -75,7 +75,6 @@ func main() {
     
     log.Printf("Starting %s on port %d", config.AppName, config.Port)
 }
-```
 
 ## Core Concepts
 
@@ -169,7 +168,143 @@ type Config struct {
 }
 ```
 
-### Validation
+### Type Conversion Utilities
+
+Lugo provides robust type conversion utilities through the `TypeConverter` interface, which safely converts values between different types:
+
+```go
+type Config struct {
+    converter *TypeConverter
+}
+```
+
+#### Built-in Conversions
+
+The following conversions are supported:
+
+| Source Type | Target Types |
+|-------------|--------------|
+| string | string, int64, float64, bool |
+| int/int8/.../int64 | string, int64, float64, bool |
+| uint/uint8/.../uint64 | string, int64, float64, bool |
+| float32/float64 | string, int64, float64, bool |
+| bool | string, int64, float64, bool |
+| time.Time | string (RFC3339 format) |
+
+#### Conversion Methods
+
+- `ToString(v interface{}) (string, error)`: Converts any supported value to string
+- `ToInt(v interface{}) (int64, error)`: Converts any supported value to int64
+- `ToFloat(v interface{}) (float64, error)`: Converts any supported value to float64
+- `ToBool(v interface{}) (bool, error)`: Converts any supported value to bool
+
+Example usage:
+```go
+// String conversion
+str, err := converter.ToString(123) // "123"
+str, err := converter.ToString(true) // "true"
+str, err := converter.ToString(time.Now()) // "2024-01-20T15:04:05Z07:00"
+
+// Numeric conversion
+num, err := converter.ToInt("123") // 123
+num, err := converter.ToInt(true) // 1
+num, err := converter.ToInt("invalid") // error
+
+// Boolean conversion
+bool, err := converter.ToBool(1) // true
+bool, err := converter.ToBool("yes") // true
+bool, err := converter.ToBool("no") // false
+```
+
+### Error Handling and Propagation
+
+Lugo uses a structured error handling system with error codes and optional error chaining.
+
+#### Error Types
+
+```go
+type Error struct {
+    Code    ErrorCode
+    Message string
+    Cause   error
+}
+```
+
+#### Error Codes
+
+| Code | Description |
+|------|-------------|
+| ErrInvalidType | Type conversion or assertion failed |
+| ErrNotFound | Configuration or value not found |
+| ErrValidation | Configuration validation failed |
+| ErrSandbox | Sandbox security violation |
+| ErrExecution | Lua execution error |
+| ErrTimeout | Operation timed out |
+| ErrCanceled | Operation was canceled |
+| ErrIO | File I/O error |
+| ErrParse | Configuration parsing error |
+| ErrConversion | Data conversion error |
+
+#### Error Utilities
+
+- `NewError(code ErrorCode, message string) *Error`: Creates a new error
+- `WrapError(code ErrorCode, message string, cause error) *Error`: Wraps an existing error
+- `IsErrorCode(err error, code ErrorCode) bool`: Checks if an error matches a specific code
+
+Example error handling:
+```go
+// Creating errors
+err := NewError(ErrNotFound, "configuration not found")
+err := WrapError(ErrValidation, "invalid port", portErr)
+
+// Checking error types
+if IsErrorCode(err, ErrNotFound) {
+    // Handle not found error
+}
+
+// Error chaining
+if err := cfg.Get("database", &dbConfig); err != nil {
+    return WrapError(ErrValidation, "database config invalid", err)
+}
+```
+
+#### Best Practices
+
+1. **Error Context**: Always provide meaningful error messages that include:
+   - The operation being performed
+   - The values or identifiers involved
+   - Any relevant context
+
+2. **Error Wrapping**: When propagating errors up the call stack:
+   - Wrap errors to add context
+   - Preserve the original error as the cause
+   - Use appropriate error codes
+
+3. **Error Handling**: When handling errors:
+   - Check specific error codes for recoverable errors
+   - Log errors with full context
+   - Provide user-friendly error messages
+
+Example:
+```go
+func (c *Config) GetDatabaseConfig() (*DatabaseConfig, error) {
+    var config DatabaseConfig
+    if err := c.Get("database", &config); err != nil {
+        if IsErrorCode(err, ErrNotFound) {
+            // Use defaults
+            return DefaultDatabaseConfig(), nil
+        }
+        return nil, WrapError(
+            ErrValidation,
+            "failed to load database configuration",
+            err,
+        )
+    }
+    return &config, nil
+}
+```
+
+## Validation
 
 Lugo supports struct tag validation:
 
@@ -755,4 +890,3 @@ func (m *MemoryLimiter) Allocate(size uint64) error {
     }
     return nil
 }
-```

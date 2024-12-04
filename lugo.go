@@ -3,6 +3,7 @@ package lugo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -77,12 +78,19 @@ const (
 	ErrValidation
 	ErrSandbox
 	ErrExecution
+	ErrTimeout
+	ErrCanceled
+	ErrIO
+	ErrParse
+	ErrConversion
 )
 
 type Error struct {
-	Code    ErrorCode
-	Message string
-	Cause   error
+	Code     ErrorCode
+	Message  string
+	Cause    error
+	Context  map[string]interface{} // Additional context for debugging
+	Location string                 // File/line information
 }
 
 func (e *Error) Error() string {
@@ -90,6 +98,49 @@ func (e *Error) Error() string {
 		return fmt.Sprintf("%s: %v", e.Message, e.Cause)
 	}
 	return e.Message
+}
+
+func (e *Error) Unwrap() error {
+	return e.Cause
+}
+
+// IsErrorCode checks if an error is a Lugo error with a specific code
+func IsErrorCode(err error, code ErrorCode) bool {
+	var lugoErr *Error
+	if errors.As(err, &lugoErr) {
+		return lugoErr.Code == code
+	}
+	return false
+}
+
+// WithContext adds context information to a Lugo error
+func WithContext(err error, key string, value interface{}) error {
+	var lugoErr *Error
+	if errors.As(err, &lugoErr) {
+		if lugoErr.Context == nil {
+			lugoErr.Context = make(map[string]interface{})
+		}
+		lugoErr.Context[key] = value
+		return lugoErr
+	}
+	return err
+}
+
+// NewError creates a new Lugo error with the given code and message
+func NewError(code ErrorCode, message string) *Error {
+	return &Error{
+		Code:    code,
+		Message: message,
+	}
+}
+
+// WrapError wraps an existing error with Lugo error context
+func WrapError(code ErrorCode, message string, cause error) *Error {
+	return &Error{
+		Code:    code,
+		Message: message,
+		Cause:   cause,
+	}
 }
 
 // New creates a new Config instance with options
@@ -828,11 +879,19 @@ func (c *Config) luaToGo(lv lua.LValue, t reflect.Type) (interface{}, error) {
 
 // Simple helper methods for common operations
 func (c *Config) DoString(script string) error {
-	return c.L.DoString(script)
+	err := c.L.DoString(script)
+	if err != nil {
+		return WrapLuaError(c.L, err)
+	}
+	return nil
 }
 
 func (c *Config) DoFile(filename string) error {
-	return c.L.DoFile(filename)
+	err := c.L.DoFile(filename)
+	if err != nil {
+		return WrapLuaError(c.L, err)
+	}
+	return nil
 }
 
 // GetGlobal retrieves a global variable with type conversion
@@ -873,7 +932,7 @@ func (c *Config) SetGlobal(name string, value interface{}) error {
 func (c *Config) Call(funcName string, args ...interface{}) ([]interface{}, error) {
 	fn := c.L.GetGlobal(funcName)
 	if fn == lua.LNil {
-		return nil, fmt.Errorf("function '%s' not found", funcName)
+		return nil, NewLuaError(c.L, ErrNotFound, fmt.Sprintf("function '%s' not found", funcName), nil)
 	}
 
 	luaArgs := make([]lua.LValue, len(args))
@@ -892,7 +951,7 @@ func (c *Config) Call(funcName string, args ...interface{}) ([]interface{}, erro
 	}, luaArgs...)
 
 	if err != nil {
-		return nil, err
+		return nil, WrapLuaError(c.L, err)
 	}
 
 	// Get all return values

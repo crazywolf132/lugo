@@ -4,7 +4,7 @@ go 1.23
 
 require (
 	github.com/fsnotify/fsnotify v1.8.0
-	github.com/stretchr/testify v1.9.0
+	github.com/stretchr/testify v1.10.0
 	github.com/yuin/gopher-lua v1.1.1
 	go.uber.org/zap v1.27.0
 )
