@@ -1,4 +1,3 @@
-// Package luaconfig provides a production-ready Lua configuration system for Go
 package lugo
 
 import (
@@ -18,12 +17,14 @@ import (
 
 // Config represents the configuration manager
 type Config struct {
-	L           *lua.LState
-	logger      *zap.Logger
-	sandbox     *Sandbox
-	middlewares []Middleware
-	mu          sync.RWMutex
-	hooks       map[HookType][]Hook
+	L                *lua.LState
+	logger           *zap.Logger
+	sandbox          *Sandbox
+	middlewares      []Middleware
+	mu               sync.RWMutex
+	hooks            map[HookType][]Hook
+	functionMetadata map[string]*FunctionMetadata
+	middlewareMap    map[string]func(lua.LGFunction) lua.LGFunction
 }
 
 // Option represents a configuration option
@@ -153,6 +154,8 @@ func New(opts ...Option) *Config {
 			MaxMemory:        100 * 1024 * 1024, // 100MB
 			MaxExecutionTime: 30 * time.Second,
 		},
+		functionMetadata: make(map[string]*FunctionMetadata),
+		middlewareMap:    make(map[string]func(lua.LGFunction) lua.LGFunction),
 	}
 
 	for _, opt := range opts {
@@ -262,6 +265,90 @@ func (c *Config) RegisterFunction(ctx context.Context, name string, fn interface
 	return nil
 }
 
+// RegisterFunctionTable registers multiple functions in a table with context
+func (c *Config) RegisterFunctionTable(ctx context.Context, name string, funcs map[string]interface{}) error {
+	if name == "" {
+		return &Error{
+			Code:    ErrInvalidType,
+			Message: "table name cannot be empty",
+		}
+	}
+
+	if len(funcs) == 0 {
+		return &Error{
+			Code:    ErrInvalidType,
+			Message: "functions map cannot be empty",
+		}
+	}
+
+	// Run hooks before creating the table
+	event := HookEvent{
+		Type: BeforeExec,
+		Name: name,
+		Args: []interface{}{funcs},
+	}
+	if err := c.runHooks(ctx, BeforeExec, event); err != nil {
+		return err
+	}
+
+	// Create the table outside the lock
+	table := c.L.NewTable()
+
+	// Prepare all functions before acquiring the lock
+	luaFuncs := make(map[string]lua.LGFunction)
+	for funcName, fn := range funcs {
+		wrapped, err := c.wrapGoFunction(fn)
+		if err != nil {
+			return &Error{
+				Code:    ErrInvalidType,
+				Message: fmt.Sprintf("failed to wrap function '%s'", funcName),
+				Cause:   err,
+			}
+		}
+
+		// Create the Lua function wrapper that captures the context
+		luaFn := func(L *lua.LState) int {
+			defer func() {
+				if r := recover(); r != nil {
+					c.logger.Error("function panic",
+						zap.String("function", funcName),
+						zap.Any("panic", r),
+					)
+					L.RaiseError("function execution failed: %v", r)
+				}
+			}()
+
+			results, err := wrapped(ctx, L)
+			if err != nil {
+				L.RaiseError("%v", err)
+				return 0
+			}
+
+			for _, result := range results {
+				L.Push(result)
+			}
+
+			return len(results)
+		}
+
+		luaFuncs[funcName] = luaFn
+	}
+
+	// Register all functions in the table
+	for funcName, luaFn := range luaFuncs {
+		table.RawSetString(funcName, c.L.NewFunction(luaFn))
+	}
+
+	// Only lock when modifying global state
+	c.mu.Lock()
+	c.L.SetGlobal(name, table)
+	c.mu.Unlock()
+
+	// Run hooks after setting the table
+	event.Type = AfterExec
+	return c.runHooks(ctx, AfterExec, event)
+}
+
 // LoadFile loads and executes a Lua file with context and hooks
 func (c *Config) LoadFile(ctx context.Context, filename string) error {
 	start := time.Now()
@@ -345,7 +432,7 @@ func (c *Config) createLuaFunction(name string, fn LuaFunction) lua.LGFunction {
 		ctx := context.Background()
 		results, err := fn(ctx, L)
 		if err != nil {
-			L.RaiseError("%v", err) // Changed to properly raise Lua error
+			L.RaiseError("%v", err)
 			return 0
 		}
 
@@ -1054,4 +1141,275 @@ func (c *Config) luaTableToTime(table *lua.LTable) (time.Time, error) {
 	sec := int(table.RawGetString("sec").(lua.LNumber))
 
 	return time.Date(year, time.Month(month), day, hour, min, sec, 0, time.Local), nil
+}
+
+// FunctionMetadata contains information about a registered function
+type FunctionMetadata struct {
+	Description string           // Function description
+	Author      string           // Function author
+	Version     string           // Function version
+	Deprecated  bool             // Whether the function is deprecated
+	Tags        []string         // Function tags for categorization
+	Params      []ParamMetadata  // Parameter descriptions
+	Returns     []ReturnMetadata // Return value descriptions
+	Examples    []string         // Usage examples
+	Middleware  []string         // Applied middleware names
+}
+
+// ParamMetadata describes a function parameter
+type ParamMetadata struct {
+	Name        string
+	Type        string
+	Description string
+	Optional    bool
+	Default     interface{}
+}
+
+// ReturnMetadata describes a function return value
+type ReturnMetadata struct {
+	Name        string
+	Type        string
+	Description string
+}
+
+// FunctionOptions configures a function registration
+type FunctionOptions struct {
+	Metadata   *FunctionMetadata
+	Namespace  string   // Function namespace (e.g., "http.client")
+	Aliases    []string // Alternative names for the function
+	Middleware []string // Middleware to apply
+	BeforeCall func(*lua.LState) error
+	AfterCall  func(*lua.LState, error)
+}
+
+// RegisterLuaFunctionWithOptions registers a Lua function with advanced options
+func (c *Config) RegisterLuaFunctionWithOptions(name string, fn func(*lua.LState) int, opts FunctionOptions) error {
+	if name == "" {
+		return &Error{
+			Code:    ErrInvalidType,
+			Message: "function name cannot be empty",
+		}
+	}
+
+	if fn == nil {
+		return &Error{
+			Code:    ErrInvalidType,
+			Message: "function cannot be nil",
+		}
+	}
+
+	// Create the function wrapper with hooks and middleware
+	wrapper := func(L *lua.LState) int {
+		// Run pre-call hook
+		if opts.BeforeCall != nil {
+			if err := opts.BeforeCall(L); err != nil {
+				L.RaiseError("pre-call hook failed: %v", err)
+				return 0
+			}
+		}
+
+		// Call the function with middleware
+		var err error
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("panic in function %s: %v", name, r)
+				L.RaiseError("%v", err)
+			}
+
+			// Run post-call hook
+			if opts.AfterCall != nil {
+				opts.AfterCall(L, err)
+			}
+		}()
+
+		// Apply middleware in reverse order to maintain proper execution order
+		currentFn := fn
+		for i := len(opts.Middleware) - 1; i >= 0; i-- {
+			if middleware, ok := c.getMiddleware(opts.Middleware[i]); ok {
+				currentFn = middleware(currentFn)
+			}
+		}
+
+		return currentFn(L)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Register the function in the specified namespace
+	if opts.Namespace != "" {
+		if err := c.registerInNamespace(opts.Namespace, name, wrapper); err != nil {
+			return err
+		}
+	} else {
+		c.L.SetGlobal(name, c.L.NewFunction(wrapper))
+	}
+
+	// Register aliases
+	for _, alias := range opts.Aliases {
+		if opts.Namespace != "" {
+			if err := c.registerInNamespace(opts.Namespace, alias, wrapper); err != nil {
+				return err
+			}
+		} else {
+			c.L.SetGlobal(alias, c.L.NewFunction(wrapper))
+		}
+	}
+
+	// Store metadata if provided
+	if opts.Metadata != nil {
+		c.storeFunctionMetadata(name, opts.Metadata)
+	}
+
+	return nil
+}
+
+// Helper function to register a function in a namespace
+func (c *Config) registerInNamespace(namespace, name string, fn lua.LGFunction) error {
+	parts := strings.Split(namespace, ".")
+
+	// Get or create the root table
+	root := c.L.GetGlobal(parts[0])
+	if root == lua.LNil {
+		root = c.L.NewTable()
+		c.L.SetGlobal(parts[0], root)
+	} else if _, ok := root.(*lua.LTable); !ok {
+		return &Error{
+			Code:    ErrInvalidType,
+			Message: fmt.Sprintf("namespace root '%s' exists but is not a table", parts[0]),
+		}
+	}
+
+	table := root.(*lua.LTable)
+
+	// Create nested tables if they don't exist
+	for i := 1; i < len(parts); i++ {
+		next := table.RawGetString(parts[i])
+		if next == lua.LNil {
+			newTable := c.L.NewTable()
+			table.RawSetString(parts[i], newTable)
+			table = newTable
+		} else {
+			var ok bool
+			table, ok = next.(*lua.LTable)
+			if !ok {
+				return &Error{
+					Code:    ErrInvalidType,
+					Message: fmt.Sprintf("namespace part '%s' exists but is not a table", parts[i]),
+				}
+			}
+		}
+	}
+
+	// Set the function in the final table
+	table.RawSetString(name, c.L.NewFunction(fn))
+	return nil
+}
+
+// ComposeFunctions creates a new function that chains multiple functions together
+func (c *Config) ComposeFunctions(name string, funcs ...string) error {
+	if len(funcs) < 2 {
+		return &Error{
+			Code:    ErrInvalidType,
+			Message: "composition requires at least two functions",
+		}
+	}
+
+	wrapper := func(L *lua.LState) int {
+		// Get initial arguments
+		args := make([]lua.LValue, L.GetTop())
+		for j := 1; j <= L.GetTop(); j++ {
+			args[j-1] = L.Get(j)
+		}
+
+		result := args
+
+		// Call the functions in the given order
+		for i := 0; i < len(funcs); i++ {
+			funcName := funcs[i]
+			fn := c.L.GetGlobal(funcName)
+			if fn == lua.LNil {
+				L.RaiseError("function not found: %s", funcName)
+				return 0
+			}
+
+			// Since we know each function returns exactly one value, we can safely use NRet: 1.
+			err := c.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}, result...)
+			if err != nil {
+				L.RaiseError("function composition failed: %v", err)
+				return 0
+			}
+
+			// Get the single return value
+			val := c.L.Get(-1)
+			c.L.Pop(1) // Remove it from stack
+
+			// This return value becomes the input for the next function
+			result = []lua.LValue{val}
+		}
+
+		// Push the final result onto the stack
+		for _, v := range result {
+			L.Push(v)
+		}
+
+		return len(result)
+	}
+
+	return c.RegisterLuaFunction(name, wrapper)
+}
+
+// getMiddleware retrieves a middleware by name
+func (c *Config) getMiddleware(name string) (func(lua.LGFunction) lua.LGFunction, bool) {
+	if c.middlewareMap == nil {
+		return nil, false
+	}
+	mw, ok := c.middlewareMap[name]
+	return mw, ok
+}
+
+// storeFunctionMetadata stores function metadata
+func (c *Config) storeFunctionMetadata(name string, metadata *FunctionMetadata) {
+	if c.functionMetadata == nil {
+		c.functionMetadata = make(map[string]*FunctionMetadata)
+	}
+	c.functionMetadata[name] = metadata
+}
+
+// RegisterLuaFunction registers a basic Lua function
+func (c *Config) RegisterLuaFunction(name string, fn func(*lua.LState) int) error {
+	return c.RegisterLuaFunctionWithOptions(name, fn, FunctionOptions{})
+}
+
+// RegisterLuaFunctionString registers a Lua function from a string
+func (c *Config) RegisterLuaFunctionString(name string, luaCode string) error {
+	if name == "" {
+		return &Error{
+			Code:    ErrInvalidType,
+			Message: "function name cannot be empty",
+		}
+	}
+
+	if luaCode == "" {
+		return &Error{
+			Code:    ErrInvalidType,
+			Message: "function code cannot be empty",
+		}
+	}
+
+	// Wrap the code in a function definition if it's not already
+	if !strings.HasPrefix(strings.TrimSpace(luaCode), "function") {
+		luaCode = fmt.Sprintf("function %s(...)\n%s\nend", name, luaCode)
+	}
+
+	err := c.L.DoString(luaCode)
+	if err != nil {
+		return &Error{
+			Code:    ErrExecution,
+			Message: "failed to register Lua function",
+			Cause:   err,
+		}
+	}
+
+	return nil
 }
