@@ -263,8 +263,13 @@ func TestRegisterFunctionTable(t *testing.T) {
 	cfg := New()
 	defer cfg.Close()
 
+	// Define a custom key type to avoid collisions
+	type contextKey string
+
+	const testContextKey = contextKey("key")
+
 	ctx := context.Background()
-	ctxWithValue := context.WithValue(ctx, "key", "value")
+	ctxWithValue := context.WithValue(ctx, testContextKey, "value")
 
 	// Test registering a table of functions
 	funcs := map[string]interface{}{
@@ -278,7 +283,7 @@ func TestRegisterFunctionTable(t *testing.T) {
 			return "Hello, " + name
 		},
 		"withContext": func(ctx context.Context, msg string) string {
-			if val, ok := ctx.Value("key").(string); ok {
+			if val, ok := ctx.Value(testContextKey).(string); ok {
 				return val + ": " + msg
 			}
 			return "Context: " + msg

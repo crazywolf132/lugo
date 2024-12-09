@@ -1,6 +1,7 @@
 package lugo
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -85,7 +86,7 @@ func TestTemplateProcessing(t *testing.T) {
 		} `lua:"server"`
 	}
 
-	err = cfg.Get(nil, "config", &result)
+	err = cfg.Get(context.Background(), "config", &result)
 	require.NoError(t, err)
 
 	assert.Equal(t, "test", result.Name)

@@ -1,6 +1,7 @@
 package lugo
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,7 +75,7 @@ func (em *EnvManager) ActivateEnvironment(name string) error {
 	// Load base configuration first
 	if env.BaseConfig != "" {
 		basePath := filepath.Join(em.configDir, env.BaseConfig)
-		if err := em.cfg.LoadFile(nil, basePath); err != nil {
+		if err := em.cfg.LoadFile(context.Background(), basePath); err != nil {
 			return fmt.Errorf("failed to load base config: %w", err)
 		}
 	}
@@ -82,7 +83,7 @@ func (em *EnvManager) ActivateEnvironment(name string) error {
 	// Load environment-specific configuration
 	if env.EnvConfig != "" {
 		envPath := filepath.Join(em.configDir, env.EnvConfig)
-		if err := em.cfg.LoadFile(nil, envPath); err != nil {
+		if err := em.cfg.LoadFile(context.Background(), envPath); err != nil {
 			return fmt.Errorf("failed to load environment config: %w", err)
 		}
 	}
@@ -90,7 +91,7 @@ func (em *EnvManager) ActivateEnvironment(name string) error {
 	// Load additional include paths
 	for _, includePath := range env.IncludePaths {
 		path := filepath.Join(em.configDir, includePath)
-		if err := em.cfg.LoadFile(nil, path); err != nil {
+		if err := em.cfg.LoadFile(context.Background(), path); err != nil {
 			return fmt.Errorf("failed to load include file %s: %w", includePath, err)
 		}
 	}

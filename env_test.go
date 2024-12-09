@@ -1,6 +1,7 @@
 package lugo
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -91,7 +92,7 @@ func TestEnvironmentManager(t *testing.T) {
 			} `lua:"defaults"`
 		}
 
-		err = cfg.Get(nil, "config", &config)
+		err = cfg.Get(context.Background(), "config", &config)
 		require.NoError(t, err)
 
 		assert.Equal(t, "development", config.Environment)
@@ -125,7 +126,7 @@ func TestEnvironmentManager(t *testing.T) {
 			} `lua:"app"`
 		}
 
-		err = cfg.Get(nil, "config", &config)
+		err = cfg.Get(context.Background(), "config", &config)
 		require.NoError(t, err)
 
 		assert.Equal(t, "production", config.Environment)
