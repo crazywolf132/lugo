@@ -1,0 +1,46 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (without v prefix)'
+        required: true
+        type: string
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install conventional-changelog
+        run: npm install -g conventional-changelog-cli
+
+      - name: Generate changelog
+        run: |
+          conventional-changelog -p angular -i CHANGELOG.md -s -r 2
+          
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: v${{ inputs.version }}
+          tag_name: v${{ inputs.version }}
+          body_path: CHANGELOG.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
