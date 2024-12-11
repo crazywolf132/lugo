@@ -419,6 +419,131 @@ if err := cfg.PushValue(value); err != nil {
    - Use appropriate synchronization when sharing config
    - Consider using separate configs for concurrent operations
 
+## Stack Manipulation Methods
+
+Lugo provides low-level access to the Lua stack through a set of methods that allow direct manipulation of values. These methods are particularly useful for advanced use cases and custom integrations.
+
+### Basic Stack Operations
+
+- `PushValue(v interface{}) error`: Pushes a Go value onto the Lua stack, automatically converting it to the appropriate Lua type
+- `PopValue() (interface{}, error)`: Removes and returns the top value from the Lua stack as a Go value
+- `PeekValue(pos int) (interface{}, error)`: Returns the value at the specified stack position without removing it
+- `GetStackSize() int`: Returns the current number of values on the Lua stack
+- `ClearStack()`: Removes all values from the Lua stack
+
+### Raw Value Operations
+
+- `GetRawLuaValue(pos int) (lua.LValue, error)`: Gets the raw lua.LValue at a given stack position
+- `PushLuaValue(v lua.LValue)`: Pushes a raw lua.LValue onto the stack without type conversion
+
+### Type-Specific Operations
+
+- `PushString(s string) error`: Pushes a string onto the Lua stack
+- `PushNumber(n float64) error`: Pushes a number onto the Lua stack
+- `PushBool(b bool) error`: Pushes a boolean onto the Lua stack
+- `PushNil() error`: Pushes a nil value onto the Lua stack
+
+Example usage of stack operations:
+```go
+// Push values onto the stack
+cfg.PushString("hello")
+cfg.PushNumber(42.0)
+cfg.PushBool(true)
+
+// Get the stack size
+size := cfg.GetStackSize() // Returns 3
+
+// Peek at values without removing them
+val, err := cfg.PeekValue(1) // Looks at top value (true)
+
+// Pop values off the stack
+val, err = cfg.PopValue() // Removes and returns top value (true)
+val, err = cfg.PopValue() // Removes and returns new top value (42.0)
+
+// Clear the stack
+cfg.ClearStack()
+```
+
+### Stack Safety and Error Handling
+
+Stack operations include comprehensive error handling for common scenarios:
+
+1. **Empty Stack Errors**
+   - Attempting to pop or peek from an empty stack
+   - Attempting to access values beyond stack size
+   - Returns `ErrStackEmpty` when trying to access an empty stack
+
+2. **Type Conversion Errors**
+   - Pushing unsupported Go types
+   - Converting incompatible Lua types
+   - Returns `ErrTypeMismatch` for incompatible type conversions
+
+3. **Stack Position Errors**
+   - Invalid stack positions (negative or too large)
+   - Stack overflow protection
+   - Returns `ErrInvalidStackPos` for invalid positions
+
+Example error handling:
+```go
+// Safe stack manipulation with error handling
+if err := cfg.PushValue(value); err != nil {
+    switch {
+    case errors.Is(err, ErrStackEmpty):
+        log.Printf("Stack is empty: %v", err)
+    case errors.Is(err, ErrTypeMismatch):
+        log.Printf("Type conversion error: %v", err)
+    case errors.Is(err, ErrInvalidStackPos):
+        log.Printf("Invalid stack position: %v", err)
+    default:
+        log.Printf("Unknown error: %v", err)
+    }
+}
+```
+
+### Context-Aware Stack Operations
+
+All stack operations now support context awareness for better control over timeouts and cancellation:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+defer cancel()
+
+// Context-aware stack operations
+if err := cfg.PushValueContext(ctx, complexValue); err != nil {
+    if errors.Is(err, context.DeadlineExceeded) {
+        log.Println("Operation timed out")
+    }
+}
+
+// Batch operations with context
+values := []interface{}{"hello", 42, true}
+if err := cfg.PushValuesContext(ctx, values...); err != nil {
+    log.Printf("Failed to push values: %v", err)
+}
+```
+
+### Stack Operation Best Practices
+
+1. **Stack Balance**
+   - Always maintain stack balance in your operations
+   - Use `defer cfg.ClearStack()` in long-running operations
+   - Check stack size before and after operations
+
+2. **Error Handling**
+   - Always check errors returned from stack operations
+   - Use context-aware methods for long-running scripts
+   - Implement proper cleanup in error cases
+
+3. **Type Safety**
+   - Use type-specific push methods when possible
+   - Validate types when using PeekValue or PopValue
+   - Handle type conversion errors appropriately
+
+4. **Performance**
+   - Use batch operations for multiple values
+   - Clear stack when no longer needed
+   - Consider using raw value operations for better performance
+
 ## Function Injection and Extension
 
 Lugo provides several ways to extend functionality by injecting Go functions into the Lua environment.

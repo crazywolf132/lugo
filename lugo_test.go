@@ -1122,3 +1122,64 @@ func TestLoadDirectory(t *testing.T) {
 	assert.Equal(t, 1, x)
 	assert.Equal(t, 2, y)
 }
+
+func TestDoStringContext(t *testing.T) {
+	cfg := New()
+	defer cfg.Close()
+
+	ctx := context.Background()
+	script := `return 42`
+
+	err := cfg.DoStringContext(ctx, script)
+	require.NoError(t, err)
+
+	// Verify the result by pushing a global variable
+	err = cfg.L.DoString(`result = 42`)
+	require.NoError(t, err)
+	var result int
+	err = cfg.GetGlobal("result", &result)
+	require.NoError(t, err)
+	assert.Equal(t, 42, result)
+
+	// Test with canceled context
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel() // immediately cancel
+
+	err = cfg.DoStringContext(canceledCtx, script)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context canceled")
+}
+
+func TestDoFileContext(t *testing.T) {
+	cfg := New()
+	defer cfg.Close()
+
+	// Create a temporary Lua file
+	dir := t.TempDir()
+	luaFilePath := filepath.Join(dir, "test.lua")
+	err := os.WriteFile(luaFilePath, []byte(`
+	local start = os.clock()
+	while os.clock() - start < 0.1 do
+	-- Busy-wait for ~0.1 seconds
+	end
+	answer = 99
+	`), 0644)
+	require.NoError(t, err)
+
+	// Normal execution without timeout
+	ctx := context.Background()
+	err = cfg.DoFileContext(ctx, luaFilePath)
+	require.NoError(t, err)
+	var answer int
+	err = cfg.GetGlobal("answer", &answer)
+	require.NoError(t, err)
+	assert.Equal(t, 99, answer)
+
+	// Now test with timeout to force cancellation during execution
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	err = cfg.DoFileContext(timeoutCtx, luaFilePath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context canceled during file execution")
+}

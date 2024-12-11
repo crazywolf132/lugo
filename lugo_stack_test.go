@@ -216,3 +216,50 @@ func TestStackErrorHandling(t *testing.T) {
 	err = cfg.PushValue(unsupported{})
 	assert.Error(t, err, "Expected error pushing unsupported type")
 }
+
+func TestPushMethods(t *testing.T) {
+	cfg := New()
+	defer cfg.Close()
+
+	// Test PushString
+	err := cfg.PushString("hello")
+	require.NoError(t, err)
+	val, err := cfg.PopValue()
+	require.NoError(t, err)
+	assert.Equal(t, "hello", val)
+
+	// Test PushNumber
+	err = cfg.PushNumber(3.14)
+	require.NoError(t, err)
+	val, err = cfg.PopValue()
+	require.NoError(t, err)
+	assert.Equal(t, float64(3.14), val.(float64))
+
+	// Test PushBool
+	err = cfg.PushBool(true)
+	require.NoError(t, err)
+	val, err = cfg.PopValue()
+	require.NoError(t, err)
+	assert.Equal(t, true, val.(bool))
+
+	// Test PushNil
+	err = cfg.PushNil()
+	require.NoError(t, err)
+	val, err = cfg.PopValue()
+	require.NoError(t, err)
+	assert.Nil(t, val)
+
+	// Test Push generic
+	complexValue := map[string]interface{}{
+		"key": "value",
+		"num": 42,
+	}
+	err = cfg.Push(complexValue)
+	require.NoError(t, err)
+	val, err = cfg.PopValue()
+	require.NoError(t, err)
+	mapped, ok := val.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "value", mapped["key"])
+	assert.Equal(t, float64(42), mapped["num"])
+}

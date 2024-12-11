@@ -75,6 +75,7 @@ type ErrorCode int
 
 const (
 	ErrInvalidType ErrorCode = iota
+	ErrType        ErrorCode = ErrInvalidType // Alias ErrType to ErrInvalidType
 	ErrNotFound
 	ErrValidation
 	ErrSandbox
@@ -1492,7 +1493,106 @@ func (c *Config) GetRawLuaValue(pos int) (lua.LValue, error) {
 	return c.L.Get(index), nil
 }
 
+// Push pushes a Go value onto the Lua stack after converting it to a Lua value.
+func (c *Config) Push(value interface{}) error {
+	lv, err := c.goToLua(value)
+	if err != nil {
+		return &Error{
+			Code:    ErrInvalidType,
+			Message: "failed to push value onto stack",
+			Cause:   err,
+		}
+	}
+	c.L.Push(lv)
+	return nil
+}
+
 // PushLuaValue pushes a raw lua.LValue onto the stack without conversion.
 func (c *Config) PushLuaValue(v lua.LValue) {
 	c.L.Push(v)
+}
+
+// PushString pushes a string onto the Lua stack.
+func (c *Config) PushString(s string) error {
+	c.L.Push(lua.LString(s))
+	return nil
+}
+
+// PushNumber pushes a float64 number onto the Lua stack.
+func (c *Config) PushNumber(n float64) error {
+	c.L.Push(lua.LNumber(n))
+	return nil
+}
+
+// PushBool pushes a boolean onto the Lua stack.
+func (c *Config) PushBool(b bool) error {
+	c.L.Push(lua.LBool(b))
+	return nil
+}
+
+// PushNil pushes a nil value onto the Lua stack.
+func (c *Config) PushNil() error {
+	c.L.Push(lua.LNil)
+	return nil
+}
+
+// DoStringContext executes a Lua string in the given context.
+// If the context is canceled or times out before completion, returns ErrCanceled.
+func (c *Config) DoStringContext(ctx context.Context, script string) error {
+	// Check context before execution
+	if ctx.Err() != nil {
+		return &Error{
+			Code:    ErrCanceled,
+			Message: "context canceled before execution",
+			Cause:   ctx.Err(),
+		}
+	}
+
+	errChan := make(chan error, 1)
+
+	go func() {
+		errChan <- c.L.DoString(script)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return &Error{
+			Code:    ErrCanceled,
+			Message: "context canceled during execution",
+			Cause:   ctx.Err(),
+		}
+	case err := <-errChan:
+		if err != nil {
+			return WrapLuaError(c.L, err)
+		}
+		return nil
+	}
+}
+
+// DoFileContext executes a Lua file in the given context.
+// If the context is canceled or times out before completion, returns ErrCanceled.
+func (c *Config) DoFileContext(ctx context.Context, path string) error {
+	if ctx.Err() != nil {
+		return &Error{
+			Code:    ErrCanceled,
+			Message: "context canceled before execution",
+			Cause:   ctx.Err(),
+		}
+	}
+
+	err := c.L.DoFile(path)
+	if err != nil {
+		return WrapLuaError(c.L, err)
+	}
+
+	// If you want to consider context again:
+	if ctx.Err() != nil {
+		return &Error{
+			Code:    ErrCanceled,
+			Message: "context canceled during file execution",
+			Cause:   ctx.Err(),
+		}
+	}
+
+	return nil
 }
